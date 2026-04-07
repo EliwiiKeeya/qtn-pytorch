@@ -1,0 +1,4 @@
+﻿torch==2.11.0
+numpy
+scipy
+git+https://github.com/Orkis-Research/Pytorch-Quaternion-Neural-Networks.git@master
