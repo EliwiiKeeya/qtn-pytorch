@@ -15,13 +15,15 @@ class Patching(nn.Module):
     - The output is a sequence of patch embeddings that can be fed into the transformer encoder.
     """
 
-    def __init__(self, patch_size: int) -> None:
+    def __init__(self, patch_size: int, num_patches: int) -> None:
         """
         Args:
             patch_size (int): The size of each patch (e.g., 16 for 16x16 patches).
+            num_patches (int): The number of patches.
         """
         super().__init__()
         self.patch_size = patch_size
+        self.num_patches = num_patches
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -43,13 +45,11 @@ class Patching(nn.Module):
                 f"Got H={H}, W={W}, patch_size={K}."
             )
 
-        nH = H // K
-        nW = W // K
-        N = nH * nW
+        M = B * self.num_patches
 
         x = x.unfold(2, K, K).unfold(3, K, K)  # [B, C, nH, nW, K, K]
         x = x.permute(0, 2, 3, 1, 4, 5)       # [B, nH, nW, C, K, K]
-        x = x.reshape(B * N, C, K, K)          # [M, C, K, K]
+        x = x.reshape(M, C, K, K)          # [M, C, K, K]
         return x
 
 
@@ -259,15 +259,17 @@ class MLPBlock(nn.Module):
     - The combination of these components allows for improved performance in various computer vision tasks when integrated into
     """
 
-    def __init__(self, channels: int, patch_size: int) -> None:
+    def __init__(self, channels: int, patch_size: int, dropout_ratio: float = 0.5) -> None:
         """
         Args:
             channels (int): The number of channels.
             patch_size (int): The size of each patch.
+            dropout_ratio (float): The ratio of dropout.
         """
         super().__init__()
         self.channels = channels
         self.patch_size = patch_size
+        self.dropout_ratio = dropout_ratio
 
         self.ln1 = nn.LayerNorm(
             [self.channels, self.patch_size, self.patch_size])
@@ -278,6 +280,7 @@ class MLPBlock(nn.Module):
             stride=1,
             padding=0
         )
+        self.dropout1 = nn.Dropout2d(self.dropout_ratio)
         self.ln2 = nn.LayerNorm(
             [self.channels, self.patch_size, self.patch_size])
         self.conv2 = nn.Conv2d(
@@ -287,6 +290,7 @@ class MLPBlock(nn.Module):
             stride=1,
             padding=0
         )
+        self.dropout2 = nn.Dropout2d(self.dropout_ratio)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -297,8 +301,11 @@ class MLPBlock(nn.Module):
         """
         x = self.ln1(x)
         x = self.conv1(x)
+        x = self.dropout1(x)
         x = self.ln2(x)
         x = self.conv2(x)
+        x = self.dropout2(x)
+
         return x
 
 
@@ -351,13 +358,18 @@ class QuaternionTransformerNetworkTiny(nn.Module):
     - The quaternion transformer blocks capture complex relationships between features in the quaternion domain, enhancing the representational capacity of the model.
     - The final output is a feature representation that can be used for various downstream tasks such as image classification, object detection, and other computer vision applications.
     """
-    
-    def __init__(self, patch_size: int, channels: int) -> None:
+
+    def __init__(self, input_size: int, patch_size: int, channels: int, num_classes: int) -> None:
         super().__init__()
+        self.input_size = input_size
         self.patch_size = patch_size
         self.channels = channels
+        self.num_classes = num_classes
 
-        self.patching = Patching(patch_size=self.patch_size)
+        self.num_patches = (self.input_size // self.patch_size) ** 2
+
+        self.patching = Patching(
+            patch_size=self.patch_size, num_patches=self.num_patches)
 
         self.basm = BandAdaptiveSelection(
             patch_size=self.patch_size, channels=self.channels)
@@ -394,13 +406,19 @@ class QuaternionTransformerNetworkTiny(nn.Module):
         self.ln = nn.LayerNorm(
             [256, self.patch_size // 4, self.patch_size // 4])
 
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.flatten = nn.Flatten(1)
+        self.output = nn.Linear(self.num_patches * 256, self.num_classes)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x (torch.Tensor): [B, C, H, W]
         Returns:
-            torch.Tensor: [M, C, K, K]
+            torch.Tensor: [B, num_classes]
         """
+        batch_size = x.shape[0]
+
         x = self.patching(x)
         x = self.basm(x)
         x = self.downsample1(x)
@@ -411,5 +429,8 @@ class QuaternionTransformerNetworkTiny(nn.Module):
         x = self.qtn3(x)
         x = self.proj2(x)
         x = self.qtn4(x)
-        x = self.ln(x)
+        x = self.ln(x).view(batch_size, self.num_patches, *x.shape[1:])
+        x = self.pool(x)
+        x = self.flatten(x)
+        x = self.output(x)
         return x
